@@ -499,6 +499,7 @@ if __name__ == "__main__":
     if RIG_NAME in bpy.data.objects:
         report()
         build_all()
+        bpy.data.objects[RIG_NAME].animation_data.action = bpy.data.actions["Mao_walk"]
         bpy.context.scene.frame_set(1)
         if bpy.app.background and bpy.data.filepath:
             out = os.path.splitext(bpy.data.filepath)[0] + "_animado.blend"
