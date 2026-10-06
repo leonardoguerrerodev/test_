@@ -33,8 +33,10 @@ TARGET_NAME = "metarig"   # armature a ajustar
 MESH_NAMES = ["Mao"]      # si existe, se usa su bounding box para escalar/mover
 # Solo en modo sin interfaz: "" = <archivo>_fitted.blend, o una ruta concreta.
 OUTPUT_BLEND = ""
-# El metarig de tu archivo tiene escala 3.08 y una rotacion leve. Rigify genera
-# mejor con la escala en 1: True = aplicar escala y rotacion (Ctrl+A) antes de ajustar.
+# El metarig de tu archivo tiene escala 3.08, una rotacion leve y esta desplazado
+# (y=-0.141). Rigify genera el rig en el origen del mundo con las coordenadas LOCALES
+# del metarig: si el objeto no esta en el origen, el rig sale corrido respecto al mesh.
+# True = aplicar ubicacion, rotacion y escala (Ctrl+A) antes de ajustar.
 APPLY_ARMATURE_TRANSFORM = True
 # Mao trae 25 grupos de vertices de un skin anterior (feet_R, Bone.001, tail1...).
 # Chocan con los DEF-* de Rigify al hacer el bind. True = borrarlos.
@@ -370,16 +372,21 @@ def run():
     if arm.hide_get():
         arm.hide_set(False)
     arm.hide_viewport = False
-    if any(abs(v - 1.0) > 1e-6 for v in arm.scale) or any(abs(r) > 1e-6 for r in arm.rotation_euler):
+    moved = (any(abs(v - 1.0) > 1e-6 for v in arm.scale)
+             or any(abs(r) > 1e-6 for r in arm.rotation_euler)
+             or any(abs(v) > 1e-6 for v in arm.location))
+    if moved:
         if APPLY_ARMATURE_TRANSFORM:
-            print("Aplicando escala %s y rotacion de '%s'" % (
+            print("Aplicando ubicacion %s, escala %s y rotacion de '%s'" % (
+                tuple(round(v, 3) for v in arm.location),
                 tuple(round(v, 3) for v in arm.scale), arm.name))
             bpy.ops.object.select_all(action="DESELECT")
             arm.select_set(True)
             bpy.context.view_layer.objects.active = arm
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
         else:
-            print("AVISO: '%s' tiene escala o rotacion; las posiciones se escriben en coordenadas de mundo." % arm.name)
+            print("AVISO: '%s' no esta en el origen con escala 1 y sin rotar. Rigify generara el "
+                  "rig con las coordenadas locales del metarig y saldra corrido respecto al mesh." % arm.name)
 
     reference = build_reference()
     results, skipped = compute_fit(reference, transform)
