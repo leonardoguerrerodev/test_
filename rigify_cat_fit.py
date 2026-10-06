@@ -33,6 +33,12 @@ TARGET_NAME = "metarig"   # armature a ajustar
 MESH_NAMES = ["Mao"]      # si existe, se usa su bounding box para escalar/mover
 # Solo en modo sin interfaz: "" = <archivo>_fitted.blend, o una ruta concreta.
 OUTPUT_BLEND = ""
+# El metarig de tu archivo tiene escala 3.08 y una rotacion leve. Rigify genera
+# mejor con la escala en 1: True = aplicar escala y rotacion (Ctrl+A) antes de ajustar.
+APPLY_ARMATURE_TRANSFORM = True
+# Mao trae 25 grupos de vertices de un skin anterior (feet_R, Bone.001, tail1...).
+# Chocan con los DEF-* de Rigify al hacer el bind. True = borrarlos.
+CLEAR_OLD_VERTEX_GROUPS = False
 
 # ---------------------------------------------------------------------------
 # Medidas del mesh de referencia (de mao_unrigged_medidas.json)
@@ -141,9 +147,11 @@ def _region(name):
 
 
 def _side(name):
-    if name.endswith(".R"):
+    """Lado segun el token L/R en cualquier posicion: ear.R.001, lid.T.L.002, f_index.001.R."""
+    parts = name.split(".")
+    if "R" in parts:
         return "R"
-    if name.endswith(".L"):
+    if "L" in parts:
         return "L"
     return "C"
 
@@ -348,6 +356,11 @@ def run():
         transform = lambda p: p
         print("AVISO: no se encontro el mesh %s; se usan las coordenadas de referencia." % MESH_NAMES)
 
+    if CLEAR_OLD_VERTEX_GROUPS:
+        for m in meshes:
+            print("Borrando %d grupos de vertices de '%s'" % (len(m.vertex_groups), m.name))
+            m.vertex_groups.clear()
+
     arm = bpy.data.objects.get(TARGET_NAME)
     if arm is None or arm.type != "ARMATURE":
         before = set(bpy.data.objects.keys())
@@ -358,7 +371,15 @@ def run():
         arm.hide_set(False)
     arm.hide_viewport = False
     if any(abs(v - 1.0) > 1e-6 for v in arm.scale) or any(abs(r) > 1e-6 for r in arm.rotation_euler):
-        print("AVISO: '%s' tiene escala o rotacion; aplicalas (Ctrl+A) si algo sale movido." % arm.name)
+        if APPLY_ARMATURE_TRANSFORM:
+            print("Aplicando escala %s y rotacion de '%s'" % (
+                tuple(round(v, 3) for v in arm.scale), arm.name))
+            bpy.ops.object.select_all(action="DESELECT")
+            arm.select_set(True)
+            bpy.context.view_layer.objects.active = arm
+            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+        else:
+            print("AVISO: '%s' tiene escala o rotacion; las posiciones se escriben en coordenadas de mundo." % arm.name)
 
     reference = build_reference()
     results, skipped = compute_fit(reference, transform)
