@@ -14,7 +14,13 @@ Que hace:
      e interpola los pesos de su cara.
   5. Limita a 4 influencias por vertice, normaliza, borra el proxy y liga Mao al rig.
 
-No toca la pose del rig. Antes de correrlo el rig debe estar en reposo (sin animacion asignada).
+Los pesos se calculan con el rig en REPOSO aunque tenga una animacion asignada: se desasigna la accion
+y se ponen a cero los controles que anima, y al terminar se restaura todo. (Con el rig en otra pose
+los pesos salen mal.) Los huesos MCH que Rigify deja con una rotacion intencionada no se tocan.
+
+Calidad: 8 influencias por vertice (con 4, las zonas donde se juntan hombro, brazo y vientre se
+estiran: el percentil 99 del estiramiento de la pata delantera pasaba de 2.2 a 7.0 veces su area) y
+suavizado de los pesos sobre el proxy. Si tu motor solo admite 4 influencias, pon MAX_INFLUENCES = 4.
 
 Uso con interfaz: abre el .blend con "Mao" y "rig", Scripting > Run Script.
 Sin interfaz:     blender -b mao_rig_generado.blend -P mao_bind_proxy.py
@@ -27,7 +33,9 @@ import time
 MESH_NAME = "Mao"
 RIG_NAME = "rig"
 VOXEL_SIZE = 0.02        # menor = proxy mas fiel (orejas, dedos) y mas lento
-MAX_INFLUENCES = 4
+MAX_INFLUENCES = 8       # Godot 4 admite 8; Unity por defecto 4
+SMOOTH_ITERATIONS = 30   # suavizado de pesos sobre el proxy (0 = sin suavizar)
+SMOOTH_FACTOR = 0.5
 MIN_WEIGHT = 1e-4
 
 
@@ -37,6 +45,46 @@ def _select_only(*objs, active=None):
     for o in objs:
         o.select_set(True)
     bpy.context.view_layer.objects.active = active or objs[-1]
+
+
+def _animated_bones(action):
+    names = set()
+    if action is None:
+        return names
+    for layer in action.layers:
+        for strip in layer.strips:
+            for cb in strip.channelbags:
+                for fc in cb.fcurves:
+                    if fc.data_path.startswith('pose.bones["'):
+                        names.add(fc.data_path.split('"')[1])
+    return names
+
+
+def _smooth_weights(proxy, weights, names):
+    """Suaviza los pesos sobre las aristas del proxy y deja las MAX_INFLUENCES mayores."""
+    import numpy as np
+    groups = sorted({g for w in weights for g in w})
+    col = {g: i for i, g in enumerate(groups)}
+    nv = len(weights)
+    W = np.zeros((nv, len(groups)))
+    for i, w in enumerate(weights):
+        for g, v in w.items():
+            W[i, col[g]] = v
+    nb = [[] for _ in range(nv)]
+    for e in proxy.data.edges:
+        a, b = e.vertices
+        nb[a].append(b)
+        nb[b].append(a)
+    idx = np.concatenate([np.array(x, dtype=int) for x in nb])
+    cnt = np.array([len(x) for x in nb])
+    start = np.concatenate([[0], np.cumsum(cnt)[:-1]])
+    for _ in range(SMOOTH_ITERATIONS):
+        mean = np.add.reduceat(W[idx], start, axis=0) / np.maximum(cnt, 1)[:, None]
+        W = (1 - SMOOTH_FACTOR) * W + SMOOTH_FACTOR * mean
+    drop = np.argsort(-W, axis=1)[:, MAX_INFLUENCES:]
+    np.put_along_axis(W, drop, 0.0, axis=1)
+    W /= np.maximum(W.sum(axis=1, keepdims=True), 1e-9)
+    return [{groups[j]: float(W[i, j]) for j in np.nonzero(W[i] > MIN_WEIGHT)[0]} for i in range(nv)]
 
 
 def run():
@@ -54,6 +102,19 @@ def run():
     if any(abs(v - 1.0) > 1e-6 for v in mesh.scale):
         raise RuntimeError("'%s' tiene escala %s. Aplica la escala (Ctrl+A > All Transforms) y repite."
                            % (MESH_NAME, tuple(mesh.scale)))
+
+    # 0. el rig en reposo mientras se calculan los pesos
+    anim = rig.animation_data
+    saved_action = anim.action if anim else None
+    if anim:
+        anim.action = None
+    for nme in _animated_bones(saved_action):
+        pb = rig.pose.bones.get(nme)
+        if pb is not None:
+            pb.location = (0, 0, 0)
+            pb.rotation_quaternion = (1, 0, 0, 0)
+            pb.scale = (1, 1, 1)
+    bpy.context.view_layer.update()
 
     # 1. limpiar
     mesh.vertex_groups.clear()
@@ -85,6 +146,8 @@ def run():
         raise RuntimeError("Los pesos automaticos fallaron tambien en el proxy. Prueba con otro "
                            "VOXEL_SIZE (por ejemplo 0.03) o revisa que los huesos esten dentro del mesh.")
     print("Pesos sobre el proxy: %d de %d vertices sin pesos" % (empty, len(pw)))
+    if SMOOTH_ITERATIONS > 0:
+        pw = _smooth_weights(proxy, pw, names)
 
     # 4. transferir al mesh original
     t = time.time()
@@ -114,6 +177,10 @@ def run():
     bpy.data.meshes.remove(data)
     _select_only(mesh, rig, active=rig)
     bpy.ops.object.parent_set(type="ARMATURE", keep_transform=True)
+
+    if anim:
+        anim.action = saved_action
+    bpy.context.view_layer.update()
 
     unweighted = sum(1 for v in mesh.data.vertices if not v.groups)
     print("Listo: %d grupos, %d vertices sin pesos de %d" % (

@@ -68,6 +68,25 @@ REF_REST_INCL = {"chest": 1.4, "neck": 24.3, "head": 25.7}
 REF_STATIC_REL = (8.0, 13.5, -23.0)
 
 # ---------------------------------------------------------------------------
+# Cabeza. Se aplican igual en todas las marchas.
+# ---------------------------------------------------------------------------
+# En Rigify el control `head` NO hereda la rotacion del cuello (head_follow = 0 y neck_follow = 0.5 en
+# el hueso `torso`). v3 suponia herencia total: sus angulos son relativos al hueso padre. Sin cambiar
+# esto, el -23 de la cabeza se aplica en absoluto y el gato mira unos 22 grados hacia arriba.
+NECK_FOLLOW = 1.0
+HEAD_FOLLOW = 1.0
+# Mirada: inclinacion final de la cabeza respecto a su reposo, en grados (+ = nariz abajo).
+# None = la que sale de v3 (+5, casi la del modelo en reposo, ligeramente hacia abajo).
+HEAD_LOOK_DEG = None
+HEAD_ROLL_DEG = 0.0    # inclinacion lateral (+ = oreja derecha abajo)
+HEAD_YAW_DEG = 0.0     # giro (+ = mira hacia el lado izquierdo del gato, +X)
+HEAD_SCALE = 1.0       # escala uniforme del control `head` (1.0 = sin cambio)
+# Cuanto de la postura baja de v3 (tronco y cuello hacia abajo) se aplica: 1.0 = la de v3 (la cabeza
+# baja unos 16 cm respecto al reposo), 0.0 = cuello como el modelo en reposo. La mirada (HEAD_LOOK_DEG)
+# no cambia con este factor: la cabeza compensa.
+POSTURE_SCALE = 0.6
+
+# ---------------------------------------------------------------------------
 # Marchas. Todo adimensional: longitudes como fraccion de la altura de la pata.
 # stride = recorrido del pie durante el apoyo; lift = altura maxima del pie.
 # ---------------------------------------------------------------------------
@@ -76,11 +95,18 @@ PITCH_STANCE = [(0.0, -6.0), (0.12, 0.0), (0.60, 0.0), (0.85, 14.0), (1.0, 30.0)
 PITCH_SWING = [(0.12, 52.0), (0.35, 38.0), (0.60, 12.0), (0.85, -8.0), (1.0, -6.0)]
 
 
+# mid_dx = donde cae el centro del apoyo respecto a la cadera (trasera) y al hombro (delantera),
+# en fracciones de la altura de la pata, + = detras. En Rig_Gato la trasera apoyaba bajo la cadera
+# (0.0) y la delantera algo detras del hombro (+0.15). En el rig nuevo el pie en reposo esta ADELANTE
+# del hombro; con +0.06 el paso queda casi simetrico y la pata no se estira al llegar hacia delante.
+MID_DX = (0.0, 0.06)
+
+
 def _gait(T, duty, td, stride, lift, bob, sink=0.0, bob_cycles=2, pitch=True,
-          center_hind=-0.12, center_front=0.03, v3_body=False):
+          mid_dx=MID_DX, v3_body=False, reach=None):
     return dict(T=T, duty=duty, td=td, stride=stride, lift=lift, bob=bob,
                 sink=sink, bob_cycles=bob_cycles, pitch=pitch,
-                center_hind=center_hind, center_front=center_front, v3_body=v3_body)
+                mid_dx=mid_dx, v3_body=v3_body, reach=reach)
 
 
 GAITS = {
@@ -100,7 +126,7 @@ GAITS = {
     "sprint": _gait(T=14, duty=0.35,
                     td={"H_L": 0.0, "F_L": 0.5, "H_R": 0.1, "F_R": 0.6},
                     stride=(1.796, 1.767), lift=(0.374, 0.368), bob=0.22, bob_cycles=1,
-                    pitch=False, center_hind=0.0, center_front=0.0),
+                    pitch=False, reach=0.97),
 }
 
 # Amplitudes angulares y laterales de v3 (angulos: no escalan; laterales: ancho del cuerpo)
@@ -110,7 +136,9 @@ V3_TAIL = dict(sway=(0.8, 0.8), wave=(0.8, 0.4), delay_sway=3.0, delay_wave=2.0,
 # Aduccion del pie en el balanceo (m en Rig_Gato; se escala con el ancho). walk_lib_v3.py usa 0, pero la
 # grafica de curvas que acompana a v3 muestra ~0.016 (trasera) y ~0.010 (delantera): activalo aqui.
 PAW_IN = (0.0, 0.0)
-REACH_MARGIN = 0.97   # no pedir mas del 97% de la longitud total de la cadena
+# No pedir mas de este porcentaje de la longitud de la cadena. Con 0.97 la pata delantera llegaba al
+# 94 % y se veia estirada; a ~90 % la rodilla/codo sigue visiblemente flexionada.
+REACH_MARGIN = 0.90
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +281,14 @@ def resolve(name, m, overrides=None):
     out["lift_abs"], out["center_abs"] = {}, {}
     for key, (_, _, _, side, front) in FEET.items():
         S = g["stride"][1 if front else 0] * h[front]
-        c = (g["center_front"] if front else g["center_hind"]) * h[front]
         leg = m["legs"][key]
-        dmax = math.sqrt(max((REACH_MARGIN * leg["reach"]) ** 2 - leg["h"] ** 2, 0.0))
-        smax = 2 * max(dmax - abs(c), 0.0)
+        dx = g["mid_dx"][1 if front else 0] * h[front]
+        # desplazamiento del pie respecto a su posicion de reposo para que el centro del apoyo
+        # caiga a `dx` detras de la cadera/hombro
+        c = (leg["hip"].y + dx) - leg["end"].y
+        margin = g["reach"] or REACH_MARGIN   # el sprint extiende mas la pata en el aire
+        dmax = math.sqrt(max((margin * leg["reach"]) ** 2 - leg["h"] ** 2, 0.0))
+        smax = 2 * max(dmax - abs(dx), 0.0)
         cand[key] = min(S, smax)
         limit[key] = "alcance" if S > smax else "angulo"
         out["lift_abs"][key] = g["lift"][1 if front else 0] * h[front]
@@ -342,6 +374,9 @@ def static_pose(rig):
     rt = _incl_bone(rig, "ORG-spine.003") - abs_chest
     rn = (_incl_bone(rig, "neck") - abs_neck) - rt
     rh = (_incl_bone(rig, "head") - abs_head) - (rt + rn)
+    look = (rt + rn + rh) if HEAD_LOOK_DEG is None else HEAD_LOOK_DEG
+    rt, rn = rt * POSTURE_SCALE, rn * POSTURE_SCALE
+    rh = look - rt - rn                   # inclinacion total = tronco + cuello + cabeza
     return rt * D2R, rn * D2R, rh * D2R
 
 
@@ -364,6 +399,10 @@ def build(name="walk", overrides=None, static=True, action_name=None):
     for n in ("thigh_parent.L", "thigh_parent.R", "upper_arm_parent.L", "upper_arm_parent.R"):
         if n in rig.pose.bones:
             rig.pose.bones[n]["IK_FK"] = 0.0
+    # el cuello y la cabeza heredan la rotacion del tronco (ver NECK_FOLLOW / HEAD_FOLLOW)
+    if "torso" in rig.pose.bones:
+        rig.pose.bones["torso"]["neck_follow"] = NECK_FOLLOW
+        rig.pose.bones["torso"]["head_follow"] = HEAD_FOLLOW
 
     aname = action_name or ("Mao_" + name)
     if aname in bpy.data.actions:
@@ -379,7 +418,7 @@ def build(name="walk", overrides=None, static=True, action_name=None):
     shift = 12.5 * T / 32.0 if g["v3_body"] else 0.0
     td = {k: (v * T + shift) % T for k, v in g["td"].items()}
     t_ref = td.get("H_R", td.get("H_L", 0.0))
-    s_neck = static_pose(rig) if (static and g["v3_body"]) else (0.0, 0.0, 0.0)
+    s_neck = static_pose(rig) if static else (0.0, 0.0, 0.0)
 
     for f in range(1, T + 2):
         t = (f - 1) % T
@@ -423,7 +462,9 @@ def build(name="walk", overrides=None, static=True, action_name=None):
                 rig, "chest", [(X, s_neck[0]), (Y, tr), (Z, -1.6 * yaw)])
             pbs["neck"].rotation_quaternion = _quat(rig, "neck", [(X, s_neck[1] + dyn), (Y, 0.3 * tr)])
             pbs["head"].rotation_quaternion = _quat(
-                rig, "head", [(X, s_neck[2] - 0.5 * dyn), (Y, -0.4 * (roll + tr)), (Z, 0.8 * yaw)])
+                rig, "head", [(X, s_neck[2] - 0.5 * dyn),
+                              (Y, -0.4 * (roll + tr) + HEAD_ROLL_DEG * D2R),
+                              (Z, 0.8 * yaw + HEAD_YAW_DEG * D2R)])
             for nme in ("hips", "chest", "neck", "head"):
                 pbs[nme].keyframe_insert("rotation_quaternion", frame=f, group=nme)
             # cola: la onda del video tenia 5 segmentos; se reparte en los 4 del rig nuevo
@@ -435,6 +476,17 @@ def build(name="walk", overrides=None, static=True, action_name=None):
                     2 * math.pi * 2 * (t - V3_TAIL["delay_wave"] * i - V3_TAIL["peak_frame"]) / T)
                 pbs[tn].rotation_quaternion = _quat(rig, tn, [(Z, sway), (X, wave)])
                 pbs[tn].keyframe_insert("rotation_quaternion", frame=f, group=tn)
+
+        if not g["v3_body"]:
+            pbs["chest"].rotation_quaternion = _quat(rig, "chest", [(X, s_neck[0])])
+            pbs["neck"].rotation_quaternion = _quat(rig, "neck", [(X, s_neck[1])])
+            pbs["head"].rotation_quaternion = _quat(
+                rig, "head", [(X, s_neck[2]), (Y, HEAD_ROLL_DEG * D2R), (Z, HEAD_YAW_DEG * D2R)])
+            for nme in ("chest", "neck", "head"):
+                pbs[nme].keyframe_insert("rotation_quaternion", frame=f, group=nme)
+        if HEAD_SCALE != 1.0:
+            pbs["head"].scale = (HEAD_SCALE, HEAD_SCALE, HEAD_SCALE)
+            pbs["head"].keyframe_insert("scale", frame=f, group="head")
 
     try:  # ciclico
         for layer in act.layers:
@@ -452,9 +504,33 @@ def build(name="walk", overrides=None, static=True, action_name=None):
     return act
 
 
+def delete_old_actions():
+    """
+    Borra las acciones que no son de este modulo (Normal_Walk, Sprint, Stealth_Walk, Walk_v1_old,
+    Walk_v3...), que vienen de Rig_Gato y apuntan a huesos que el rig nuevo no tiene. Se quedan
+    solo las que empiezan por "Mao_". Devuelve los nombres borrados.
+    """
+    import bpy
+    gone = []
+    for act in list(bpy.data.actions):
+        if act.name.startswith("Mao_"):
+            continue
+        act.use_fake_user = False
+        for obj in bpy.data.objects:
+            ad = obj.animation_data
+            if ad is not None and ad.action is act:
+                ad.action = None
+        gone.append(act.name)
+        bpy.data.actions.remove(act)
+    return gone
+
+
 def build_all():
     import bpy
     acts = [build(n) for n in GAITS]
+    rig = bpy.data.objects[RIG_NAME]
+    rig.animation_data.action = bpy.data.actions["Mao_walk"]
+    bpy.context.scene.frame_start, bpy.context.scene.frame_end = 1, GAITS["walk"]["T"]
     bpy.context.scene.frame_set(1)
     return acts
 
@@ -498,9 +574,8 @@ if __name__ == "__main__":
     import bpy
     if RIG_NAME in bpy.data.objects:
         report()
+        print("Acciones antiguas borradas:", delete_old_actions())
         build_all()
-        bpy.data.objects[RIG_NAME].animation_data.action = bpy.data.actions["Mao_walk"]
-        bpy.context.scene.frame_set(1)
         if bpy.app.background and bpy.data.filepath:
             out = os.path.splitext(bpy.data.filepath)[0] + "_animado.blend"
             bpy.ops.wm.save_as_mainfile(filepath=out)
